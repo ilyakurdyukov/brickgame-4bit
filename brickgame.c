@@ -317,15 +317,29 @@ static void sys_redraw(sysctx_t *sys, uint8_t *mem) {
 	printf("\33[H\n"); // refresh screen
 }
 
-static void run_game(uint8_t *rom, sysctx_t *sys) {
-	uint16_t pc = 0, stack = 0;
-	uint8_t a = 0, r[5] = { 0 }, cf = 0, tf = 0;
+typedef struct {
+	uint8_t mem[256]; uint16_t pc, stack;
+	uint8_t a, r[5], cf, tmr, tf, timer_en;
+} cpu_state_t;
+
+static int check_state(cpu_state_t *s) {
+	unsigned i, x = 0;
+	for (i = 0; i < 256; i++) x |= s->mem[i], s->mem[i] &= 15;
+	x |= s->pc >> 8; s->pc &= 0xfff;
+	x |= s->stack >> 9; s->stack &= 0x1fff;
+	x |= s->a; s->a &= 15;
+	for (i = 0; i < 5; i++) x |= s->r[i], s->r[i] &= 15;
+	x |= (s->cf | s->tf | s->timer_en) << 3;
+	s->cf &= 1; s->tf &= 1; s->timer_en &= 1;
+	return x >> 4;
+}
+
+static void run_game(uint8_t *rom, sysctx_t *sys, cpu_state_t *s) {
+	uint16_t pc = s->pc;
+	uint8_t a = s->a, cf = s->cf;
 	uint8_t pa = 0, pm = 0xf, ps = 0xf, pp = 0xf;
-	uint8_t mem[256] = { 0 };
-	uint8_t tmr = 0, timer_en = 0;
 	uint32_t tickcount = 0, prev_tick = 0, tmr_frac = 0;
 	uint64_t last_time;
-	unsigned sleep_ticks = 1000, sleep_delay = 1000;
 
 #define CPU_TRACE 0
 
@@ -334,13 +348,13 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 	for (;;) {
 		unsigned x, op;
 		op = rom[pc];
-#define R1R0 r[1] << 4 | r[0]
-#define R3R2 r[3] << 4 | r[2]
+#define R1R0 s->r[1] << 4 | s->r[0]
+#define R3R2 s->r[3] << 4 | s->r[2]
 
 #if CPU_TRACE
 #define TRACE(...) fprintf(stderr, "  " __VA_ARGS__)
 		fprintf(stderr, "%03x: o=%02x,r=%x:%02x:%02x:%x,c%u",
-				pc, op, a, R1R0, R3R2, r[4], cf);
+				pc, op, a, R1R0, R3R2, s->r[4], cf);
 #else
 #define TRACE(...) (void)0
 #endif
@@ -358,22 +372,22 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 
 	case 0x04: // MOV A, [R1R0]
 	case 0x06: // MOV A, [R3R2]
-		x = op & 2; x = r[x + 1] << 4 | r[x]; a = mem[x]; TRACE("a=%x", a); break;
+		x = op & 2; x = s->r[x + 1] << 4 | s->r[x]; a = s->mem[x]; TRACE("a=%x", a); break;
 	case 0x05: // MOV [R1R0], A
 	case 0x07: // MOV [R3R2], A
-		x = op & 2; x = r[x + 1] << 4 | r[x]; mem[x] = a; TRACE("m[%02x]=%x", x, a); break;
+		x = op & 2; x = s->r[x + 1] << 4 | s->r[x]; s->mem[x] = a; TRACE("m[%02x]=%x", x, a); break;
 
 	case 0x08: /* ADC A, [R1R0] */
 	case 0x09: /* ADD A, [R1R0] */
 		cf &= ~op;
-		a += mem[R1R0] + cf; cf = a >> 4; a &= 15;
+		a += s->mem[R1R0] + cf; cf = a >> 4; a &= 15;
 		TRACE("a=%x", a);
 		break;
 
 	case 0x0a: /* SBC A, [R1R0] */
 	case 0x0b: /* SUB A, [R1R0] */
 		cf |= op & 1;
-		a += 15 - mem[R1R0] + cf; cf = a >> 4; a &= 15;
+		a += 15 - s->mem[R1R0] + cf; cf = a >> 4; a &= 15;
 		TRACE("a=%x", a);
 		break;
 
@@ -381,43 +395,43 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 	case 0x0d: // DEC [R1R0]
 	case 0x0e: // INC [R3R2]
 	case 0x0f: // DEC [R3R2]
-		x = op & 2; x = r[x + 1] << 4 | r[x];
-		mem[x] = (mem[x] + (op & 1 ? -1 : 1)) & 15;
-		TRACE("m[%02x]=%x", x, mem[x]);
+		x = op & 2; x = s->r[x + 1] << 4 | s->r[x];
+		s->mem[x] = (s->mem[x] + (op & 1 ? -1 : 1)) & 15;
+		TRACE("m[%02x]=%x", x, s->mem[x]);
 		break;
 
 	case 0x10: case 0x12: // INC Rn
 	case 0x14: case 0x16: case 0x18:
-		x = op >> 1 & 7; r[x] = (r[x] + 1) & 15; TRACE("r%u=%x", x, r[x]); break;
+		x = op >> 1 & 7; s->r[x] = (s->r[x] + 1) & 15; TRACE("r%u=%x", x, s->r[x]); break;
 
 	case 0x11: case 0x13: // DEC Rn
 	case 0x15: case 0x17: case 0x19:
-		x = op >> 1 & 7; r[x] = (r[x] - 1) & 15; TRACE("r%u=%x", x, r[x]); break;
+		x = op >> 1 & 7; s->r[x] = (s->r[x] - 1) & 15; TRACE("r%u=%x", x, s->r[x]); break;
 
-	case 0x1a: /* AND A, [R1R0] */ a &= mem[R1R0]; TRACE("a=%x", a); break;
-	case 0x1b: /* XOR A, [R1R0] */ a ^= mem[R1R0]; TRACE("a=%x", a); break;
-	case 0x1c: /* OR A, [R1R0] */ a |= mem[R1R0]; TRACE("a=%x", a); break;
-	case 0x1d: /* AND [R1R0], A */ mem[R1R0] &= a; TRACE("m[%02x]=%x", R1R0, mem[R1R0]); break;
-	case 0x1e: /* XOR [R1R0], A */ mem[R1R0] ^= a; TRACE("m[%02x]=%x", R1R0, mem[R1R0]); break;
-	case 0x1f: /* OR [R1R0], A */ mem[R1R0] |= a; TRACE("m[%02x]=%x", R1R0, mem[R1R0]); break;
+	case 0x1a: /* AND A, [R1R0] */ a &= s->mem[R1R0]; TRACE("a=%x", a); break;
+	case 0x1b: /* XOR A, [R1R0] */ a ^= s->mem[R1R0]; TRACE("a=%x", a); break;
+	case 0x1c: /* OR A, [R1R0] */ a |= s->mem[R1R0]; TRACE("a=%x", a); break;
+	case 0x1d: /* AND [R1R0], A */ s->mem[R1R0] &= a; TRACE("m[%02x]=%x", R1R0, s->mem[R1R0]); break;
+	case 0x1e: /* XOR [R1R0], A */ s->mem[R1R0] ^= a; TRACE("m[%02x]=%x", R1R0, s->mem[R1R0]); break;
+	case 0x1f: /* OR [R1R0], A */ s->mem[R1R0] |= a; TRACE("m[%02x]=%x", R1R0, s->mem[R1R0]); break;
 
 	// MOV Rn, A
 	case 0x20: case 0x22: // MOV Rn, A
 	case 0x24: case 0x26: case 0x28:
-		r[op >> 1 & 7] = a; TRACE("r%u=%x", op >> 1 & 7, a); break;
+		s->r[op >> 1 & 7] = a; TRACE("r%u=%x", op >> 1 & 7, a); break;
 
 	case 0x21: case 0x23: // MOV A, Rn
 	case 0x25: case 0x27: case 0x29:
-		a = r[op >> 1 & 7]; TRACE("a=%x", a); break;
+		a = s->r[op >> 1 & 7]; TRACE("a=%x", a); break;
 
 	case 0x2a: /* CLC */ cf = 0; TRACE("c=%x", cf); break;
 	case 0x2b: /* STC */ cf = 1; TRACE("c=%x", cf); break;
 	case 0x2c: /* EI */ /* TODO */; TRACE("i=%x", 1); break;
 	case 0x2d: /* DI */ /* TODO */; TRACE("i=%x", 0); break;
 	case 0x2e: /* RET */
-		pc = stack; TRACE("pc=%03x", pc); pc--; break;
+		pc = s->stack; TRACE("pc=%03x", pc); pc--; break;
 	case 0x2f: /* RETI */
-		pc = stack; cf = pc >> 12; TRACE("pc=%03x,c=%u", pc, cf); pc--; break;
+		pc = s->stack; cf = pc >> 12; TRACE("pc=%03x,c=%u", pc, cf); pc--; break;
 
 	case 0x30: /* OUT PA, A */ pa = a; TRACE("pa=%x", pa); break;
 	case 0x31: /* INC A */ a = (a + 1) & 15; TRACE("a=%x", a); break;
@@ -431,17 +445,17 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 	case 0x37: /* HALT */
 		TRACE("halt"); break;
 	case 0x38: /* TIMER ON */
-		timer_en = 1; TRACE("timer on"); break;
+		s->timer_en = 1; TRACE("timer on"); break;
 	case 0x39: /* TIMER OFF */
-		timer_en = 0; TRACE("timer off"); break;
+		s->timer_en = 0; TRACE("timer off"); break;
 	case 0x3a: /* MOV A, TMRL */
-		a = tmr & 15; TRACE("a=%x", a); break;
+		a = s->tmr & 15; TRACE("a=%x", a); break;
 	case 0x3b: /* MOV A, TMRH */
-		a = tmr >> 4; TRACE("a=%x", a); break;
+		a = s->tmr >> 4; TRACE("a=%x", a); break;
 	case 0x3c: /* MOV TMRL, A */
-		tmr = (tmr & 0xf0) | a; TRACE("tmrl=%x", a); break;
+		s->tmr = (s->tmr & 0xf0) | a; TRACE("tmrl=%x", a); break;
 	case 0x3d: /* MOV TMRH, A */
-		tmr = a << 4 | (tmr & 15); TRACE("tmrh=%x", a); break;
+		s->tmr = a << 4 | (s->tmr & 15); TRACE("tmrh=%x", a); break;
 	case 0x3e: /* NOP */
 		TRACE("nop"); break;
 	case 0x3f: /* DEC A */ a = (a - 1) & 15; TRACE("a=%x", a); break;
@@ -462,38 +476,38 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 		x = rom[++pc & 0xfff] & 15; TRACE("sound %x", x);
 		(void)x; /* TODO */ break;
 	case 0x46: // MOV R4, imm4
-		r[4] = rom[++pc & 0xfff] & 15; TRACE("r4=%x", r[4]); break;
+		s->r[4] = rom[++pc & 0xfff] & 15; TRACE("r4=%x", s->r[4]); break;
 	case 0x47: // TIMER imm8
-		tmr = rom[++pc & 0xfff]; TRACE("tmr=%02x", tmr); break;
+		s->tmr = rom[++pc & 0xfff]; TRACE("tmr=%02x", s->tmr); break;
 	case 0x48: /* SOUND ONE */ TRACE("sound one"); /* TODO */ break;
 	case 0x49: /* SOUND LOOP */ TRACE("sound loop"); /* TODO */ break;
 	case 0x4a: /* SOUND OFF */ TRACE("sound off"); /* TODO */ break;
 	case 0x4b: /* SOUND A */ TRACE("sound a"); /* TODO */ break;
 	case 0x4c: /* READ R4A */
-		a = rom[(pc & 0xf00) | a << 4 | mem[R1R0]];
+		a = rom[(pc & 0xf00) | a << 4 | s->mem[R1R0]];
 		TRACE("r4:a=%02x", a);
-		r[4] = a >> 4; a &= 15; break;
+		s->r[4] = a >> 4; a &= 15; break;
 	case 0x4d: /* READF R4A */
-		a = rom[0xf00 | a << 4 | mem[R1R0]];
+		a = rom[0xf00 | a << 4 | s->mem[R1R0]];
 		TRACE("r4:a=%02x", a);
-		r[4] = a >> 4; a &= 15; break;
+		s->r[4] = a >> 4; a &= 15; break;
 	case 0x4e: /* READ MR0A */
-		a = rom[(pc & 0xf00) | a << 4 | r[4]];
+		a = rom[(pc & 0xf00) | a << 4 | s->r[4]];
 		TRACE("m[%02x]:a=%02x", R1R0, a);
-		mem[R1R0] = a >> 4; a &= 15; break;
+		s->mem[R1R0] = a >> 4; a &= 15; break;
 	case 0x4f: /* READF MR0A */
-		a = rom[0xf00 | a << 4 | r[4]];
+		a = rom[0xf00 | a << 4 | s->r[4]];
 		TRACE("m[%02x]:a=%02x", R1R0, a);
-		mem[R1R0] = a >> 4; a &= 15; break;
+		s->mem[R1R0] = a >> 4; a &= 15; break;
 
 #define CASE8(x) \
 	case x:     case x + 1: case x + 2: case x + 3: \
 	case x + 4: case x + 5: case x + 6: case x + 7:
 
 	CASE8(0x50) CASE8(0x58) // MOV R1R0, imm8
-		r[0] = op & 0xf; r[1] = rom[++pc & 0xfff] & 15; TRACE("r1r0=%02x", R1R0); break;
+		s->r[0] = op & 0xf; s->r[1] = rom[++pc & 0xfff] & 15; TRACE("r1r0=%02x", R1R0); break;
 	CASE8(0x60) CASE8(0x68) // MOV R3R2, imm8
-		r[2] = op & 0xf; r[3] = rom[++pc & 0xfff] & 15; TRACE("r3r2=%02x", R3R2); break;
+		s->r[2] = op & 0xf; s->r[3] = rom[++pc & 0xfff] & 15; TRACE("r3r2=%02x", R3R2); break;
 
 	CASE8(0x70) CASE8(0x78) /* MOV A, imm4 */ a = op & 15; TRACE("a=%x", a); break;
 
@@ -503,14 +517,14 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 #define X(cond) JMP11 if (cond) pc = x - 1, TRACE_JUMP; break;
 	CASE8(0x80) CASE8(0x88) // JAn imm11
 	CASE8(0x90) CASE8(0x98) X(a >> (op >> 3 & 3) & 1)
-	CASE8(0xa0) /* JNZ R0, imm11 */ X(r[0])
-	CASE8(0xa8) /* JNZ R1, imm11 */ X(r[1])
+	CASE8(0xa0) /* JNZ R0, imm11 */ X(s->r[0])
+	CASE8(0xa8) /* JNZ R1, imm11 */ X(s->r[1])
 	CASE8(0xb0) /* JZ A, imm11 */ X(!a)
 	CASE8(0xb8) /* JNZ A, imm11 */ X(a)
 	CASE8(0xc0) /* JC imm11 */ X(cf)
 	CASE8(0xc8) /* JNC imm11 */ X(!cf)
-	CASE8(0xd0) /* JTMR imm11 */ JMP11 if (tf) pc = x - 1, TRACE_JUMP; tf = 0; break;
-	CASE8(0xd8) /* JNZ R4, imm11 */ X(r[4])
+	CASE8(0xd0) /* JTMR imm11 */ JMP11 if (s->tf) pc = x - 1, TRACE_JUMP; s->tf = 0; break;
+	CASE8(0xd8) /* JNZ R4, imm11 */ X(s->r[4])
 #undef X
 #undef JMP11
 
@@ -519,9 +533,9 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 		TRACE("pc=%03x", pc);
 		pc--; break;
 	CASE8(0xf0) CASE8(0xf8) // CALL imm12
-		stack = (pc + 2) & 0xfff;
+		s->stack = (pc + 2) & 0xfff;
 		pc = (op & 15) << 8 | rom[(pc + 1) & 0xfff];
-		TRACE("pc=%03x,ret=%03x", pc, stack);
+		TRACE("pc=%03x,ret=%03x", pc, s->stack);
 		pc--; break;
 
 	default:
@@ -536,7 +550,7 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 
 #if CPU_TRACE
 		if (tickcount > 2150) {
-			// display_redraw(sys, mem);
+			// display_redraw(sys, s->mem);
 			break;
 		}
 #endif
@@ -546,7 +560,7 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 			uint64_t new_time, delay;
 			uint32_t keys, sleep_delay;
 			prev_tick = tickcount;
-			sys_redraw(sys, mem);
+			sys_redraw(sys, s->mem);
 			new_time = get_time_usec();
 			delay = new_time - last_time;
 			sleep_delay = sys->sleep_delay;
@@ -562,17 +576,19 @@ static void run_game(uint8_t *rom, sysctx_t *sys) {
 			ps = keys >> 4 & 15;
 		}
 
-		if (timer_en) {
+		if (s->timer_en) {
 			tmr_frac += sys->timer_inc;
 			if (tmr_frac >= 0x10000) {
 				tmr_frac -= 0x10000;
-				if (!++tmr) tf = 1;
+				if (!++s->tmr) s->tf = 1;
 			}
 		}
 
 		(void)pa;
 
 	} // end for
+
+	s->pc = pc; s->a = a; s->cf = cf;
 }
 
 static void test_keys() {
@@ -585,17 +601,24 @@ static void test_keys() {
 int main(int argc, char **argv) {
 	sysctx_t ctx;
 	const char *rom_fn = "brickrom.bin";
+	const char *save_fn = NULL;
 	uint8_t rom[0x1000];
 	FILE *f; unsigned n;
 	uint32_t hold_time = 50;
 	uint32_t sleep_ticks = 1000, sleep_delay = 1000;
 	uint32_t timer_inc = 0x10000 >> 5;
 	const char *progname = argv[0];
+	cpu_state_t cpu = { 0 };
 
 	while (argc > 1) {
 		if (!strcmp(argv[1], "--rom")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			rom_fn = argv[2];
+			argc -= 2; argv += 2;
+		} else if (!strcmp(argv[1], "--save")) {
+			if (argc <= 2) ERR_EXIT("bad option\n");
+			save_fn = argv[2];
+			if (!*save_fn) save_fn = NULL;
 			argc -= 2; argv += 2;
 		} else if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
 			printf(
@@ -603,6 +626,7 @@ int main(int argc, char **argv) {
 "Options:\n"
 "  -h, --help        Display help text and exit\n"
 "  --rom file        To specify the ROM file name (default is \"brickrom.bin\")\n"
+"  --save file       To specify the file for cpu state\n"
 "  -k n              Holds a key for N ms after pressing (default is 50)\n"
 "  -t n              Stops at every N tick to redraw, sleep and check keys\n"
 "                      (default is 1000)\n"
@@ -637,6 +661,16 @@ int main(int argc, char **argv) {
 	fclose(f);
 	if (n != sizeof(rom)) ERR_EXIT("unexpected ROM size\n");
 
+	if (save_fn) {
+		f = fopen(save_fn, "rb");
+		if (f) {
+			n = fread(&cpu, 1, sizeof(cpu), f);
+			fclose(f);
+			if (n != sizeof(cpu)) ERR_EXIT("unexpected save size\n");
+		}
+		check_state(&cpu);
+	}
+
 	sys_init(&ctx);
 	ctx.hold_time = hold_time;
 	ctx.sleep_ticks = sleep_ticks;
@@ -644,7 +678,16 @@ int main(int argc, char **argv) {
 	ctx.timer_inc = timer_inc;
 
 	//test_keys();
-	run_game(rom, &ctx);
+	run_game(rom, &ctx, &cpu);
+
+	if (save_fn) {
+		f = fopen(save_fn, "wb");
+		if (f) {
+			n = fwrite(&cpu, 1, sizeof(cpu), f);
+			fclose(f);
+		}
+	}
+
 	sys_close(&ctx);
 }
 

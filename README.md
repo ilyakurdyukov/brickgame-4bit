@@ -15,7 +15,7 @@ Works only on Linux.
 
 * Run `./brickgame --help` to show the configuation options.
 
-* The game and hi-scores are not saved at exit.
+* Use `--save <filename>` option to save game state on exit.
 
 * Sound is not supported. At the beginning of the level the game plays a melody (which you won't hear), mute the sound (M key) so you don't have to wait.
 
