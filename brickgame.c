@@ -85,15 +85,20 @@ static int sys_events(sysctx_t *sys) {
 			}
 			else if (a == 10) key = 4; // enter = start/pause
 			else if (a == 32) key = 0; // space = rotate
-			else if ((a | 32) == 'p') key = 4; // p = start/pause
-			else if ((a | 32) == 'm') key = 5; // m = mute
-			else if ((a | 32) == 'r') key = 6; // r = on/off
-			else if ((a | 32) == 'q') return 1 << 16; // q = exit
-			else status = 0;
+			else switch (a | 32) {
+			case 'w': key = 0; break; // w = up
+			case 'a': key = 3; break; // a = left
+			case 's': key = 1; break; // s = down
+			case 'd': key = 2; break; // d = right
+			case 'p': key = 4; break; // p = start/pause
+			case 'm': key = 5; break; // m = mute
+			case 'r': key = 6; break; // r = on/off
+			default: status = 0;
+			}
 			if (key >= 0) SET_KEY(key);
 		}
 		if (n != sizeof(buf)) {
-			if (status == 1) SET_KEY(6); // esc = on/off
+			if (status == 1) return 1 << 16; // escape = exit
 			break;
 		}
 	}
@@ -668,7 +673,7 @@ int main(int argc, char **argv) {
 			fclose(f);
 			if (n != sizeof(cpu)) ERR_EXIT("unexpected save size\n");
 		}
-		check_state(&cpu);
+		if (check_state(&cpu)) ERR_EXIT("save state is corrupted\n");
 	}
 
 	sys_init(&ctx);

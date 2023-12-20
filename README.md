@@ -25,10 +25,12 @@ Works only on Linux.
 
 | Key(s)           | Action             |
 |------------------|--------------------|
-| Left/Right/Down  | left/right/down    |
-| Up/Space         | rotate             |
-| R/Esc            | reset              |
+| Up/Space/W       | rotate             |
+| Left/A           | left               |
+| Down/S           | down               |
+| Right/D          | right              |
+| R                | reset              |
 | M                | mute               |
-| Q                | exit               |
+| Escape           | exit               |
 | P/Enter          | start/pause        |
 
