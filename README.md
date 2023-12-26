@@ -21,6 +21,18 @@ Works only on Linux.
 
 * [Here](https://github.com/ilyakurdyukov/ida-holtek-4bit) is a disassembler module for IDA to explore the ROM.
 
+### Experimental decompiler mode
+
+Decompiles the ROM into C code. Not recommended.  
+Has an inaccurate timer, save states are incompatible with the emulator mode.
+
+```
+$ make DECOMPILED=1 ROMNAME=E23PlusMarkII96in1.bin
+$ ./brickgame --save bricksave.bin
+```
+
+Made for ROM code research.
+
 ### Controls
 
 | Key(s)           | Action             |

@@ -39,7 +39,12 @@ static uint64_t get_time_usec() {
 
 typedef struct {
 	struct termios tcattr;
-	unsigned hold_time, sleep_ticks, sleep_delay, timer_inc;
+#ifdef DECOMPILED
+	unsigned timer;
+#else
+	unsigned sleep_ticks;
+#endif
+	unsigned hold_time, sleep_delay, timer_inc;
 	uint32_t keys;
 	uint64_t key_timers[8];
 	uint16_t old_rows[20];
@@ -98,7 +103,8 @@ static int sys_events(sysctx_t *sys) {
 			if (key >= 0) SET_KEY(key);
 		}
 		if (n != sizeof(buf)) {
-			if (status == 1) return 1 << 16; // escape = exit
+			if (status == 1) // escape = exit
+				return sys->keys = 1 << 16;
 			break;
 		}
 	}
@@ -179,7 +185,7 @@ static void sys_init(sysctx_t *sys) {
 	}
 
 	{
-		int i, n = sizeof(sys->disp_buf);
+		int n = sizeof(sys->disp_buf);
 		char *d = sys->disp_buf, *e = d + n;
 		char buf[16];
 		const disp_item_t *item = disp_item;
@@ -339,9 +345,10 @@ static int check_state(cpu_state_t *s) {
 	return x >> 4;
 }
 
+#ifndef DECOMPILED
 static void run_game(uint8_t *rom, sysctx_t *sys, cpu_state_t *s) {
-	uint16_t pc = s->pc;
-	uint8_t a = s->a, cf = s->cf;
+	unsigned pc = s->pc;
+	unsigned a = s->a, cf = s->cf;
 	uint8_t pa = 0, pm = 0xf, ps = 0xf, pp = 0xf;
 	uint32_t tickcount = 0, prev_tick = 0, tmr_frac = 0;
 	uint64_t last_time;
@@ -420,7 +427,6 @@ static void run_game(uint8_t *rom, sysctx_t *sys, cpu_state_t *s) {
 	case 0x1e: /* XOR [R1R0], A */ s->mem[R1R0] ^= a; TRACE("m[%02x]=%x", R1R0, s->mem[R1R0]); break;
 	case 0x1f: /* OR [R1R0], A */ s->mem[R1R0] |= a; TRACE("m[%02x]=%x", R1R0, s->mem[R1R0]); break;
 
-	// MOV Rn, A
 	case 0x20: case 0x22: // MOV Rn, A
 	case 0x24: case 0x26: case 0x28:
 		s->r[op >> 1 & 7] = a; TRACE("r%u=%x", op >> 1 & 7, a); break;
@@ -595,6 +601,9 @@ static void run_game(uint8_t *rom, sysctx_t *sys, cpu_state_t *s) {
 
 	s->pc = pc; s->a = a; s->cf = cf;
 }
+#else
+void run_decomp(sysctx_t *user, cpu_state_t *cpu);
+#endif
 
 static void test_keys() {
 	char x;
@@ -605,48 +614,69 @@ static void test_keys() {
 
 int main(int argc, char **argv) {
 	sysctx_t ctx;
-	const char *rom_fn = "brickrom.bin";
 	const char *save_fn = NULL;
-	uint8_t rom[0x1000];
 	FILE *f; unsigned n;
-	uint32_t hold_time = 50;
+#ifndef DECOMPILED
+	const char *rom_fn = "brickrom.bin";
+	uint8_t rom[0x1000];
 	uint32_t sleep_ticks = 1000, sleep_delay = 1000;
-	uint32_t timer_inc = 0x10000 >> 5;
+	uint32_t timer_inc = 32;
+#else
+	uint32_t sleep_delay = 10000, timer_inc = 10;
+#endif
+	uint32_t hold_time = 50;
 	const char *progname = argv[0];
-	cpu_state_t cpu = { 0 };
+	cpu_state_t cpu;
 
 	while (argc > 1) {
-		if (!strcmp(argv[1], "--rom")) {
-			if (argc <= 2) ERR_EXIT("bad option\n");
-			rom_fn = argv[2];
-			argc -= 2; argv += 2;
-		} else if (!strcmp(argv[1], "--save")) {
+		if (!strcmp(argv[1], "--save")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			save_fn = argv[2];
 			if (!*save_fn) save_fn = NULL;
 			argc -= 2; argv += 2;
+#ifndef DECOMPILED
+		} else if (!strcmp(argv[1], "--rom")) {
+			if (argc <= 2) ERR_EXIT("bad option\n");
+			rom_fn = argv[2];
+			argc -= 2; argv += 2;
+#endif
 		} else if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
 			printf(
 "Usage: %s [options]\n"
 "Options:\n"
 "  -h, --help        Display help text and exit\n"
-"  --rom file        To specify the ROM file name (default is \"brickrom.bin\")\n"
+#ifndef DECOMPILED
+"  --rom file        To specify the ROM file name\n"
+"                      (default is \"%s\")\n"
+#endif
 "  --save file       To specify the file for cpu state\n"
-"  -k n              Holds a key for N ms after pressing (default is 50)\n"
+"  -k n              Holds a key for N ms after pressing (default is %d)\n"
+#ifndef DECOMPILED
 "  -t n              Stops at every N tick to redraw, sleep and check keys\n"
-"                      (default is 1000)\n"
-"  -d n              Max sleep time in microseconds (default is 1000)\n"
-"  -i n              Increment timer every N ticks (default is 32)\n"
-"\n", progname);
+"                      (default is %d)\n"
+#endif
+"  -d n              Max sleep time in microseconds (default is %d)\n"
+"  -i n              Increment timer every N ticks (default is %d)\n"
+"\n", progname,
+#ifndef DECOMPILED
+		rom_fn,
+#endif
+		hold_time,
+#ifndef DECOMPILED
+		sleep_ticks,
+#endif
+		sleep_delay, timer_inc);
 			return 1;
 		} else if (!strcmp(argv[1], "-k")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			hold_time = atoi(argv[2]);
 			argc -= 2; argv += 2;
+#ifndef DECOMPILED
 		} else if (!strcmp(argv[1], "-t")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			sleep_ticks = atoi(argv[2]);
 			argc -= 2; argv += 2;
+#endif
 		} else if (!strcmp(argv[1], "-d")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			sleep_delay = atoi(argv[2]);
@@ -654,17 +684,20 @@ int main(int argc, char **argv) {
 		} else if (!strcmp(argv[1], "-i")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			timer_inc = atoi(argv[2]);
-			timer_inc = timer_inc ? 0x10000 / timer_inc : 0x10000;
-			if (timer_inc > 0x10000) timer_inc = 0x10000;
 			argc -= 2; argv += 2;
 		} else ERR_EXIT("unknown option\n");
 	}
 
+	timer_inc = timer_inc ? 0x10000 / timer_inc : 0x10000;
+	if (timer_inc > 0x10000) timer_inc = 0x10000;
+
+#ifndef DECOMPILED
 	f = fopen(rom_fn, "rb");
 	if (!f) ERR_EXIT("fopen failed\n");
 	n = fread(rom, 1, sizeof(rom), f);
 	fclose(f);
 	if (n != sizeof(rom)) ERR_EXIT("unexpected ROM size\n");
+#endif
 
 	if (save_fn) {
 		f = fopen(save_fn, "rb");
@@ -674,16 +707,24 @@ int main(int argc, char **argv) {
 			if (n != sizeof(cpu)) ERR_EXIT("unexpected save size\n");
 		}
 		if (check_state(&cpu)) ERR_EXIT("save state is corrupted\n");
+	} else {
+		memset(&cpu, 0, sizeof(cpu));
 	}
 
 	sys_init(&ctx);
 	ctx.hold_time = hold_time;
+#ifndef DECOMPILED
 	ctx.sleep_ticks = sleep_ticks;
+#endif
 	ctx.sleep_delay = sleep_delay;
 	ctx.timer_inc = timer_inc;
 
 	//test_keys();
+#ifndef DECOMPILED
 	run_game(rom, &ctx, &cpu);
+#else
+	run_decomp(&ctx, &cpu);
+#endif
 
 	if (save_fn) {
 		f = fopen(save_fn, "wb");
@@ -696,3 +737,114 @@ int main(int argc, char **argv) {
 	sys_close(&ctx);
 }
 
+#ifdef DECOMPILED
+
+#if 1
+static int cb_in_ps(sysctx_t *sys) { return (~sys->keys >> 4) & 0xf; }
+static int cb_in_pp(sysctx_t *sys) { return ~sys->keys & 0xf; }
+
+static int cb_get_tf(sysctx_t *sys, uint8_t *m) {
+	int redraw = 0;
+	int timer = sys->timer + sys->timer_inc;
+	if (timer > 0x10000) timer -= 0x10000, redraw = 1;
+	sys->timer = timer;
+	if (redraw) {
+		sys_redraw(sys, m);
+		usleep(sys->sleep_delay);
+		sys_events(sys);
+	}
+	return redraw;
+}
+
+static int cb_get_tmr(sysctx_t *sys) {
+	(void)sys;
+	return rand() & 0xff;
+}
+#else
+int cb_in_ps(sysctx_t *sys);
+int cb_in_pp(sysctx_t *sys);
+int cb_get_tf(sysctx_t *sys);
+int cb_get_tmr(sysctx_t *sys);
+#endif
+
+#define RET_OFFSET(x) x,
+#define RET_LABEL(x) &&r_##x,
+#define START \
+	static uint16_t const ret_offsets[] = { \
+		RET_ENUM(RET_OFFSET) 0xdb7, 0 }; \
+	static void* const ret_labels[] = { \
+		RET_ENUM(RET_LABEL) &&l_db7, &&l_start }; \
+	do { \
+		unsigned i, n = sizeof(ret_offsets) / sizeof(uint16_t); \
+		unsigned pc = cpu->stack; \
+		for (i = 0; i < n; i++) \
+			if (pc == ret_offsets[i]) { stack = ret_labels[i]; break; } \
+		if (i == n) break; \
+		pc = cpu->pc; \
+		for (i = 0; i < n; i++) \
+			if (pc == ret_offsets[i]) goto *ret_labels[i]; \
+	} while (0); \
+	ERR_EXIT("unable to continue with this save state\n"); \
+l_exit: \
+	cpu->a = a; cpu->r[4] = r4; cpu->cf = cf; \
+	cpu->r[0] = r1r0 & 15; cpu->r[1] = r1r0 >> 4; \
+	cpu->r[2] = r3r2 & 15; cpu->r[3] = r3r2 >> 4; \
+	{ \
+		unsigned i, n = sizeof(ret_offsets) / sizeof(uint16_t); \
+		for (i = 0; i < n; i++) \
+			if (stack == ret_labels[i]) { cpu->stack = ret_offsets[i]; break; } \
+		if (i == n) ERR_EXIT("can't find return address in the list\n"); \
+		cpu->pc = 0xdb7; \
+	} \
+	return; \
+l_start:
+
+#define TIMER_ON
+#define GET_TMR cb_get_tmr(sys)
+#define OUT_PA
+#define IN_PS a = cb_in_ps(sys);
+#define IN_PP a = cb_in_pp(sys);
+#define SOUND(x)
+#define SOUND_OFF
+#define HALT
+#define JTMR(label) if (cb_get_tf(sys, m)) { \
+	if (sys->keys & 0x10000) goto l_exit; \
+	goto label; \
+}
+
+void run_decomp(sysctx_t *sys, cpu_state_t *cpu) {
+	uint8_t *m = cpu->mem;
+	int a = cpu->a, r4 = cpu->r[4], cf = cpu->cf;
+	unsigned r1r0 = cpu->r[1] << 4 | cpu->r[0];
+	unsigned r3r2 = cpu->r[3] << 4 | cpu->r[2];
+	void *stack;
+
+#define RR cf = a & 1, a = (a << 4 | a) >> 1 & 15;
+#define RL cf = a >> 3, a = (a << 4 | a) >> 3 & 15;
+#define RRC a = cf << 4 | a, cf = a & 1, a >>= 1;
+#define RLC a = a << 1 | cf, cf = a >> 4, a &= 15;
+#define DAA if (a >= 10 || cf) a = (a + 6) & 15, cf = 1;
+
+#define ADD(a, b) a = (cf = a + b) & 15, cf >>= 4;
+#define ADC(a, b) a = (cf = a + b + cf) & 15, cf >>= 4;
+#define SUB(a, b) a = (cf = a + 16 - b) & 15, cf >>= 4;
+#define SBC(a, b) a = (cf = a + 15 - b + cf) & 15, cf >>= 4;
+
+#define INC(a) a = (a + 1) & 15;
+#define DEC(a) a = (a - 1) & 15;
+#define INC_RE(r, op) r = (r & 0xf0) | ((r op 1) & 15);
+#define INC_RO(r, op) r = (r op 16) & 0xff;
+#define INC_R0 INC_RE(r1r0, +)
+#define INC_R1 INC_RO(r1r0, +)
+#define INC_R2 INC_RE(r3r2, +)
+#define INC_R3 INC_RO(r3r2, +)
+#define DEC_R0 INC_RE(r1r0, -)
+#define DEC_R1 INC_RO(r1r0, -)
+#define DEC_R2 INC_RE(r3r2, -)
+#define DEC_R3 INC_RO(r3r2, -)
+#define CALL(fn, ret) stack = &&r_##ret; goto fn; r_##ret:;
+#define RET goto *stack;
+
+#include "brickgame_dec.c"
+}
+#endif // DECOMPILED
