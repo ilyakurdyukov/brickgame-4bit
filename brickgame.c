@@ -40,11 +40,10 @@ static uint64_t get_time_usec() {
 typedef struct {
 	struct termios tcattr;
 #ifdef DECOMPILED
-	unsigned timer;
-#else
-	unsigned sleep_ticks;
+	uint64_t last_time;
+	unsigned tmr_frac;
 #endif
-	unsigned hold_time, sleep_delay, timer_inc;
+	unsigned hold_time, sleep_ticks, sleep_delay, timer_inc;
 	uint32_t keys;
 	uint64_t key_timers[8];
 	uint16_t old_rows[20];
@@ -619,12 +618,10 @@ int main(int argc, char **argv) {
 #ifndef DECOMPILED
 	const char *rom_fn = "brickrom.bin";
 	uint8_t rom[0x1000];
-	uint32_t sleep_ticks = 1000, sleep_delay = 1000;
-	uint32_t timer_inc = 32;
-#else
-	uint32_t sleep_delay = 10000, timer_inc = 10;
 #endif
 	uint32_t hold_time = 50;
+	uint32_t sleep_ticks = 1000, sleep_delay = 1000;
+	uint32_t timer_inc = 32;
 	const char *progname = argv[0];
 	cpu_state_t cpu;
 
@@ -651,10 +648,8 @@ int main(int argc, char **argv) {
 #endif
 "  --save file       To specify the file for cpu state\n"
 "  -k n              Holds a key for N ms after pressing (default is %d)\n"
-#ifndef DECOMPILED
 "  -t n              Stops at every N tick to redraw, sleep and check keys\n"
 "                      (default is %d)\n"
-#endif
 "  -d n              Max sleep time in microseconds (default is %d)\n"
 "  -i n              Increment timer every N ticks (default is %d)\n"
 "\n", progname,
@@ -662,21 +657,17 @@ int main(int argc, char **argv) {
 		rom_fn,
 #endif
 		hold_time,
-#ifndef DECOMPILED
 		sleep_ticks,
-#endif
 		sleep_delay, timer_inc);
 			return 1;
 		} else if (!strcmp(argv[1], "-k")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			hold_time = atoi(argv[2]);
 			argc -= 2; argv += 2;
-#ifndef DECOMPILED
 		} else if (!strcmp(argv[1], "-t")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			sleep_ticks = atoi(argv[2]);
 			argc -= 2; argv += 2;
-#endif
 		} else if (!strcmp(argv[1], "-d")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			sleep_delay = atoi(argv[2]);
@@ -712,9 +703,7 @@ int main(int argc, char **argv) {
 
 	sys_init(&ctx);
 	ctx.hold_time = hold_time;
-#ifndef DECOMPILED
 	ctx.sleep_ticks = sleep_ticks;
-#endif
 	ctx.sleep_delay = sleep_delay;
 	ctx.timer_inc = timer_inc;
 
@@ -722,6 +711,8 @@ int main(int argc, char **argv) {
 #ifndef DECOMPILED
 	run_game(rom, &ctx, &cpu);
 #else
+	ctx.timer_inc = timer_inc * sleep_ticks >> 8;
+	ctx.last_time = get_time_usec();	
 	run_decomp(&ctx, &cpu);
 #endif
 
@@ -738,33 +729,38 @@ int main(int argc, char **argv) {
 
 #ifdef DECOMPILED
 
-#if 1
-static int cb_in_ps(sysctx_t *sys) { return (~sys->keys >> 4) & 0xf; }
-static int cb_in_pp(sysctx_t *sys) { return ~sys->keys & 0xf; }
-
-static int cb_get_tf(sysctx_t *sys, uint8_t *m) {
-	int redraw = 0;
-	int timer = sys->timer + sys->timer_inc;
-	if (timer > 0x10000) timer -= 0x10000, redraw = 1;
-	sys->timer = timer;
-	if (redraw) {
-		sys_redraw(sys, m);
-		usleep(sys->sleep_delay);
+static void timer_handler(sysctx_t *sys, cpu_state_t *cpu) {
+	uint64_t new_time = get_time_usec();
+	uint64_t last_time = sys->last_time;
+	uint64_t diff = new_time - last_time;
+	unsigned sleep_delay = sys->sleep_delay;
+	if (diff >= sleep_delay) {
+		sys->last_time = last_time + sleep_delay;
+		sys->tmr_frac += sys->timer_inc;
+		sys_redraw(sys, cpu->mem);
 		sys_events(sys);
 	}
-	return redraw;
+}
+
+static int cb_in_ps(sysctx_t *sys, cpu_state_t *cpu) {
+	timer_handler(sys, cpu); return (~sys->keys >> 4) & 0xf; }
+static int cb_in_pp(sysctx_t *sys, cpu_state_t *cpu) {
+	timer_handler(sys, cpu); return ~sys->keys & 0xf; }
+
+static int cb_get_tf(sysctx_t *sys, cpu_state_t *cpu) {
+	int tmr_frac;
+	usleep(sys->sleep_delay / 4);
+	timer_handler(sys, cpu);
+	tmr_frac = sys->tmr_frac;
+	if (tmr_frac < 0x10000) return 0;
+	sys->tmr_frac = tmr_frac - 0x10000;
+	return 1;
 }
 
 static int cb_get_tmr(sysctx_t *sys) {
 	(void)sys;
 	return rand() & 0xff;
 }
-#else
-int cb_in_ps(sysctx_t *sys);
-int cb_in_pp(sysctx_t *sys);
-int cb_get_tf(sysctx_t *sys);
-int cb_get_tmr(sysctx_t *sys);
-#endif
 
 #define RET_OFFSET(x) x,
 #define RET_LABEL(x) &&r_##x,
@@ -801,12 +797,12 @@ l_start:
 #define TIMER_ON
 #define GET_TMR cb_get_tmr(sys)
 #define OUT_PA
-#define IN_PS a = cb_in_ps(sys);
-#define IN_PP a = cb_in_pp(sys);
+#define IN_PS a = cb_in_ps(sys, cpu);
+#define IN_PP a = cb_in_pp(sys, cpu);
 #define SOUND(x)
 #define SOUND_OFF
 #define HALT
-#define JTMR(label) if (cb_get_tf(sys, m)) { \
+#define JTMR(label) if (cb_get_tf(sys, cpu)) { \
 	if (sys->keys & 0x10000) goto l_exit; \
 	goto label; \
 }

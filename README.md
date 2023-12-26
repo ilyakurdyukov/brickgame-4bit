@@ -24,7 +24,7 @@ Works only on Linux.
 ### Experimental decompiler mode
 
 Decompiles the ROM into C code. Not recommended.  
-Has an inaccurate timer, save states are incompatible with the emulator mode.
+Save states are incompatible with the emulator mode.
 
 ```
 $ make DECOMPILED=1 ROMNAME=E23PlusMarkII96in1.bin
