@@ -699,6 +699,7 @@ int main(int argc, char **argv) {
 	if (n != sizeof(rom)) ERR_EXIT("unexpected ROM size\n");
 #endif
 
+	memset(&cpu, 0, sizeof(cpu));
 	if (save_fn) {
 		f = fopen(save_fn, "rb");
 		if (f) {
@@ -707,8 +708,6 @@ int main(int argc, char **argv) {
 			if (n != sizeof(cpu)) ERR_EXIT("unexpected save size\n");
 		}
 		if (check_state(&cpu)) ERR_EXIT("save state is corrupted\n");
-	} else {
-		memset(&cpu, 0, sizeof(cpu));
 	}
 
 	sys_init(&ctx);
