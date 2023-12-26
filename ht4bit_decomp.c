@@ -72,6 +72,7 @@ static unsigned mark_opcodes(uint8_t *rom, unsigned pc, uint8_t *marks) {
 		CASE8(0xd8) /* JNZ R4, imm11 */
 			x = (pc & 0x800) | (op & 7) << 8 | rom[(pc + 1) & 0xfff];
 			marks[++pc & 0xfff] |= 2; marks[x] |= 4;
+			if ((op & 0xf8) == 0xd0) marks[x & 0xfff] |= 32;
 			read_mask |= mark_opcodes(rom, x, marks); break;
 
 		CASE8(0xe0) CASE8(0xe8) // JMP imm12
@@ -104,11 +105,18 @@ static void decompile(uint8_t *rom, uint8_t *marks, unsigned read_mask, FILE *fo
 					j == 255 ? "\n\t};\n" : (j & 15) == 15 ? ",\n\t\t" : ",");
 		}
 
-		
 		fprintf(fo, "#define RET_ENUM(X) \\\n");
 		for (i = 0, pc = 0; pc < 0x1000; pc++) if (marks[pc] & 16) {
 			if (i >= 5) i = 0, fprintf(fo, " \\\n");
 			fprintf(fo, "%sX(0x%03x)", !i ? "\t" : " ", pc);
+			i++;
+		}
+		fprintf(fo, "\n\n");
+
+		fprintf(fo, "#define JTMR_ENUM(X) \\\n");
+		for (i = 0, pc = 0; pc < 0x1000; pc++) if (marks[pc] & 32) {
+			if (i >= 3) i = 0, fprintf(fo, " \\\n");
+			fprintf(fo, "%sX(l_%03x, 0x%03x)", !i ? "\t" : " ", pc, pc);
 			i++;
 		}
 		fprintf(fo, "\n\n");
@@ -254,7 +262,7 @@ static void decompile(uint8_t *rom, uint8_t *marks, unsigned read_mask, FILE *fo
 		CASE8(0xc0) /* JC imm11 */ X("cf")
 		CASE8(0xc8) /* JNC imm11 */ X("!cf")
 		CASE8(0xd0) /* JTMR imm11 */
-			JMP11 OUT("JTMR(l_%03x)\n", x); break;
+			JMP11 OUT("JTMR(l_%03x, 0x%03x)\n", x, x); break;
 		CASE8(0xd8) /* JNZ R4, imm11 */ X("r4")
 #undef X
 #undef JMP11

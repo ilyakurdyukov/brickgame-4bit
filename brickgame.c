@@ -764,14 +764,17 @@ static int cb_get_tmr(sysctx_t *sys) {
 
 #define RET_OFFSET(x) x,
 #define RET_LABEL(x) &&r_##x,
+#define RET_OFFSET2(l, o) o,
+#define RET_LABEL2(l, o) &&l,
 #define START \
+	unsigned pc; \
 	static uint16_t const ret_offsets[] = { \
-		RET_ENUM(RET_OFFSET) 0xdb7, 0 }; \
+		RET_ENUM(RET_OFFSET) JTMR_ENUM(RET_OFFSET2) 0 }; \
 	static void* const ret_labels[] = { \
-		RET_ENUM(RET_LABEL) &&l_db7, &&l_start }; \
+		RET_ENUM(RET_LABEL) JTMR_ENUM(RET_LABEL2) &&l_start }; \
 	do { \
 		unsigned i, n = sizeof(ret_offsets) / sizeof(uint16_t); \
-		unsigned pc = cpu->stack; \
+		pc = cpu->stack; \
 		for (i = 0; i < n; i++) \
 			if (pc == ret_offsets[i]) { stack = ret_labels[i]; break; } \
 		if (i == n) break; \
@@ -781,6 +784,7 @@ static int cb_get_tmr(sysctx_t *sys) {
 	} while (0); \
 	ERR_EXIT("unable to continue with this save state\n"); \
 l_exit: \
+	cpu->pc = pc; \
 	cpu->a = a; cpu->r[4] = r4; cpu->cf = cf; \
 	cpu->r[0] = r1r0 & 15; cpu->r[1] = r1r0 >> 4; \
 	cpu->r[2] = r3r2 & 15; cpu->r[3] = r3r2 >> 4; \
@@ -789,7 +793,6 @@ l_exit: \
 		for (i = 0; i < n; i++) \
 			if (stack == ret_labels[i]) { cpu->stack = ret_offsets[i]; break; } \
 		if (i == n) ERR_EXIT("can't find return address in the list\n"); \
-		cpu->pc = 0xdb7; \
 	} \
 	return; \
 l_start:
@@ -802,8 +805,8 @@ l_start:
 #define SOUND(x)
 #define SOUND_OFF
 #define HALT
-#define JTMR(label) if (cb_get_tf(sys, cpu)) { \
-	if (sys->keys & 0x10000) goto l_exit; \
+#define JTMR(label, offset) if (cb_get_tf(sys, cpu)) { \
+	if (sys->keys & 0x10000) { pc = offset; goto l_exit; } \
 	goto label; \
 }
 
