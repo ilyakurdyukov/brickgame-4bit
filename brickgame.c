@@ -348,7 +348,7 @@ static void sys_redraw(sysctx_t *sys, uint8_t *mem) {
 						printf("\33[%u;40H%x |", i + row + 2, i);
 					sys->keys |= 1 << 18;
 #if NO_FLICKER
-					memset(sys->memcopy, -1, sizeof(sys->memcopy));
+					memset(sys->memcopy, 0, sizeof(sys->memcopy));
 #endif
 				}
 				for (i = 0; i < 16; i++) {
@@ -809,7 +809,7 @@ static int cb_get_tf(sysctx_t *sys, cpu_state_t *cpu) {
 }
 
 static int cb_get_tmr(sysctx_t *sys) {
-	return (sys->randseed * 0x08088405 + 1) >> 24;
+	return (sys->randseed = sys->randseed * 0x08088405 + 1) >> 24;
 }
 
 #define RET_OFFSET(x) x,
