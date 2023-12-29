@@ -37,11 +37,20 @@ static uint64_t get_time_usec() {
 #define DISP_CHECK_END 216
 #define DISP_CHECK_SIZE (DISP_CHECK_END - DISP_CHECK_START)
 
+// to display memory map without flickering
+#ifndef NO_FLICKER
+#define NO_FLICKER 200
+#endif
+
 typedef struct {
 	struct termios tcattr;
 #ifdef DECOMPILED
 	uint64_t last_time;
 	unsigned tmr_frac;
+	uint32_t randseed;
+#endif
+#if NO_FLICKER
+	uint16_t memcopy[256];
 #endif
 	unsigned hold_time, sleep_ticks, sleep_delay, timer_inc;
 	uint32_t keys;
@@ -89,6 +98,7 @@ static int sys_events(sysctx_t *sys) {
 			}
 			else if (a == 10) key = 4; // enter = start/pause
 			else if (a == 32) key = 0; // space = rotate
+			else if (a == 9) sys->keys ^= 1 << 17; // tab = memory map
 			else switch (a | 32) {
 			case 'w': key = 0; break; // w = up
 			case 'a': key = 3; break; // a = left
@@ -103,7 +113,7 @@ static int sys_events(sysctx_t *sys) {
 		}
 		if (n != sizeof(buf)) {
 			if (status == 1) // escape = exit
-				return sys->keys = 1 << 16;
+				sys->keys |= 1 << 16;
 			break;
 		}
 	}
@@ -322,6 +332,46 @@ static void sys_redraw(sysctx_t *sys, uint8_t *mem) {
 				buf[i] = j < 10 ? j + '0' : x ? '?' : ' ';
 			}
 			printf("\33[1;26H%.4s", buf);
+		}
+	}
+	// update memory map
+	{
+		int i, j, state = sys->keys >> 17 & 3;
+		int row = 3;
+		if (state) {
+			if (state & 1) {
+				char buf[32];
+				if (!(state & 2)) {
+					printf("\33[%u;40H    0 1 2 3 4 5 6 7 8 9 a b c d e f", row);
+					printf("\33[%u;40H  /--------------------------------", row + 1);
+					for (i = 0; i < 16; i++)
+						printf("\33[%u;40H%x |", i + row + 2, i);
+					sys->keys |= 1 << 18;
+#if NO_FLICKER
+					memset(sys->memcopy, -1, sizeof(sys->memcopy));
+#endif
+				}
+				for (i = 0; i < 16; i++) {
+					for (j = 0; j < 16; j++) {
+						int a = mem[i << 4 | j];
+#if NO_FLICKER
+						int b = sys->memcopy[i << 4 | j];
+						int thr = NO_FLICKER * 16;
+						if ((a ^ b) & 15) b = a;
+						if (b < thr) b += 0x10, a = 0x10;
+						sys->memcopy[i << 4 | j] = b;
+#endif
+						buf[j * 2] = a > 15 ? '#' : a < 10 ? a + '0' : a - 10 + 'a';
+						buf[j * 2 + 1] = ' ';
+					}
+					printf("\33[%u;44H%.31s", i + row + 2, buf);
+				}
+			} else {
+				sys->keys &= ~(1 << 18);
+				for (i = 0; i < 18; i++)
+					// "\33[K" - clear right
+					printf("\33[%u;40H\33[K", i + row);
+			}
 		}
 	}
 	printf("\33[H\n"); // refresh screen
@@ -713,6 +763,7 @@ int main(int argc, char **argv) {
 #else
 	ctx.timer_inc = timer_inc * sleep_ticks >> 8;
 	ctx.last_time = get_time_usec();	
+	ctx.randseed = ctx.last_time;
 	run_decomp(&ctx, &cpu);
 #endif
 
@@ -758,8 +809,7 @@ static int cb_get_tf(sysctx_t *sys, cpu_state_t *cpu) {
 }
 
 static int cb_get_tmr(sysctx_t *sys) {
-	(void)sys;
-	return rand() & 0xff;
+	return (sys->randseed * 0x08088405 + 1) >> 24;
 }
 
 #define RET_OFFSET(x) x,
