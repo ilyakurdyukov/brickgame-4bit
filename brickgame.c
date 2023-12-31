@@ -156,8 +156,11 @@ static void sys_gamepad_events(sysctx_t *sys) {
 	while (poll(&fds, 1, 0)) {
 		int key, state;
 		int n = read(sys->js_fd, &event, sizeof(event));
-		if (n != sizeof(event))
-			ERR_EXIT("unexpected joystic event\n");
+		if (n != sizeof(event)) {
+			close(sys->js_fd);
+			sys->js_fd = -1;
+			break;
+		}
 		key = -1;
 		if (event.type == JS_EVENT_BUTTON) {
 			if (event.number < sys->js_buttons)
@@ -362,7 +365,9 @@ static void sys_close(sysctx_t *sys) {
 	tcsetattr(0, TCSANOW, &sys->tcattr);
 	printf("\33[m\33[2J\33[?25h\33[H"); // show cursor
 #if USE_GAMEPAD
-	close(sys->js_fd);
+	if (sys->js_fd >= 0) close(sys->js_fd);
+	if (sys->js_ax) free(sys->js_ax);
+	if (sys->js_btn) free(sys->js_btn);
 #endif
 }
 
