@@ -65,6 +65,9 @@ typedef struct {
 #if USE_GAMEPAD
 	int js_fd;
 	uint32_t js_keys;
+	int js_axes, js_buttons;
+	int8_t *js_ax;
+	int8_t *js_btn;
 #endif
 	unsigned hold_time, sleep_ticks, sleep_delay, timer_inc;
 	uint32_t misc;
@@ -82,7 +85,69 @@ typedef struct {
 #if USE_GAMEPAD
 #include <linux/joystick.h>
 #include <sys/poll.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
+
+static void sys_gamepad_init(sysctx_t *sys) {
+	uint8_t axmap[ABS_CNT];
+	uint16_t btnmap[KEY_MAX - BTN_MISC + 1];
+	uint8_t buttons, axes;
+	int i;
+
+	if (ioctl(sys->js_fd, JSIOCGAXES, &axes) < 0)
+		ERR_EXIT("ioctl(JSIOCGAXES) failed\n");
+	if (ioctl(sys->js_fd, JSIOCGAXMAP, axmap) < 0)
+		ERR_EXIT("ioctl(JSIOCGAXMAP) failed\n");
+
+	sys->js_axes = axes;
+	sys->js_ax = malloc(axes * sizeof(*sys->js_ax));
+	if (!sys->js_ax) ERR_EXIT("malloc failed\n");
+	memset(sys->js_ax, -1, axes * sizeof(*sys->js_ax));
+	for (i = 0; i < axes; i++)
+		switch (axmap[i]) {
+		case ABS_X:
+		case ABS_HAT0X:
+			sys->js_ax[i] = 0x32; // left/right
+			break;
+		case ABS_Y:
+		case ABS_HAT0Y:
+			sys->js_ax[i] = 0x01; // up/down
+			break;
+		}
+
+	if (ioctl(sys->js_fd, JSIOCGBUTTONS, &buttons) < 0)
+		ERR_EXIT("ioctl(JSIOCGBUTTONS) failed\n");
+	if (ioctl(sys->js_fd, JSIOCGBTNMAP, btnmap) < 0)
+		ERR_EXIT("ioctl(JSIOCGBTNMAP) failed\n");
+
+	sys->js_buttons = buttons;
+	sys->js_btn = malloc(buttons * sizeof(*sys->js_btn));
+	if (!sys->js_btn) ERR_EXIT("malloc failed\n");
+	memset(sys->js_btn, -1, buttons * sizeof(*sys->js_btn));
+	for (i = 0; i < buttons; i++)
+		switch (btnmap[i]) {
+		case BTN_A:
+		case BTN_B:
+		case BTN_X:
+		case BTN_Y:
+			sys->js_btn[i] = 0; // rotate
+			break;
+		case BTN_TL: // L1
+		case BTN_TR: // R1
+			sys->js_btn[i] = 17; // memory map
+			break;
+		case BTN_SELECT:
+			sys->js_btn[i] = 5; // mute
+			break;
+		case BTN_START:
+			sys->js_btn[i] = 4; // start/pause
+			break;
+		case BTN_MODE:
+			sys->js_btn[i] = 6; // on/off
+			break;
+		}
+}
+
 static void sys_gamepad_events(sysctx_t *sys) {
 	struct js_event event;
 	struct pollfd fds = { 0 };
@@ -94,56 +159,27 @@ static void sys_gamepad_events(sysctx_t *sys) {
 		if (n != sizeof(event))
 			ERR_EXIT("unexpected joystic event\n");
 		key = -1;
-		if (event.type == JS_EVENT_BUTTON)
-		switch (event.number) {
-			case 0: /* A */
-			case 1: /* B */
-			case 2: /* X */
-			case 3: /* Y */
-				key = 0; // rotate
-				break;
-			case 4: /* L1 */
-			case 5: /* R1 */
-				key = 17; // memory map
-				break;
-			case 6: /* Select */
-				key = 5; // mute
-				break;
-			case 7: /* Start */
-				key = 4; // start/pause
-				break;
-			case 8:
-				key = 6; // on/off
-				break;
-		}
-		else if (event.type == JS_EVENT_AXIS)
-		switch (event.number) {
-			case 0: /* Left/Right analog */
-			case 6: /* Left/Right */
-				key = 0x132;
-				break;
-			case 1: /* Up/Down analog */
-			case 7: /* Up/Down */
-				key = 0x101;
-				break;
+		if (event.type == JS_EVENT_BUTTON) {
+			if (event.number < sys->js_buttons)
+				key = sys->js_btn[event.number];
+		} else if (event.type == JS_EVENT_AXIS) {
+			if (event.number < sys->js_axes)
+				key = sys->js_ax[event.number] | -0x100;
 		}
 
 		if (key == -1) continue;
 		if (key & 0x100) {
-			int key1 = key >> 4 & 15, key2 = key & 15;
-			int value = event.value;
-			if (value <= -0x4000) state = 2;
-			else if (value > 0x3fff) state = 1;
-			else state = 0;
+			int mask, value = event.value;
+			int thr = 0x4000; // 0.5
 
-			if (state & 2)
-				sys->js_keys |= 1 << key1;
-			else
-				sys->js_keys &= ~(1 << key1);
-			if (state & 1)
-				sys->js_keys |= 1 << key2;
-			else
-				sys->js_keys &= ~(1 << key2);
+			mask = 1 << (key >> 4 & 15);
+			if (value <= -thr) sys->js_keys |= mask;
+			else sys->js_keys &= ~mask;
+
+			mask = 1 << (key & 15);
+			if (value >= thr) sys->js_keys |= mask;
+			else sys->js_keys &= ~mask;
+
 		} else if (key == 17) { // memory map
 			if (event.value == 1) 
 				sys->js_keys ^= 1 << key;
@@ -823,6 +859,10 @@ int main(int argc, char **argv) {
 "  --rom file        To specify the ROM file name\n"
 "                      (default is \"%s\")\n"
 #endif
+#if USE_GAMEPAD
+"  --js device       To specify gamepad device\n"
+"                      (default is \"%s\")\n"
+#endif
 "  --save file       To specify the file for cpu state\n"
 "  -k n              Holds a key for N ms after pressing (default is %d)\n"
 "  -t n              Stops at every N tick to redraw, sleep and check keys\n"
@@ -832,6 +872,9 @@ int main(int argc, char **argv) {
 "\n", progname,
 #ifndef DECOMPILED
 		rom_fn,
+#endif
+#if USE_GAMEPAD
+		js_fn,
 #endif
 		hold_time,
 		sleep_ticks,
@@ -888,6 +931,7 @@ int main(int argc, char **argv) {
 	ctx.js_fd = -1;
 	if (js_fn) {
 		ctx.js_fd = open(js_fn, O_RDONLY);
+		if (ctx.js_fd >= 0) sys_gamepad_init(&ctx);
 		//test_gamepad(ctx.js_fd);
 	}
 #endif

@@ -45,10 +45,21 @@ Made for ROM code research.
 | M                | mute               |
 | Escape           | exit               |
 | P/Enter          | start/pause        |
+| Tab              | memory map         |
 
-### Experimental gamepad support
+### Gamepad controls
 
-Compile with `GAMEPAD=1` option to make. Don't know if the control mappings will be the same on different gamepads.
+| Key(s)           | Action             |
+|------------------|--------------------|
+| Left Stick       | L/R/down/rotate    |
+| D-Pad            | L/R/down/rotate    |
+| A/B/X/Y          | rotate             |
+| L1/R1            | memory map         |
+| Select           | mute               |
+| Start            | start/pause        |
+| Mode             | reset              |
+
+Compile with `GAMEPAD=1` option to enable gamepad support.
 
 ### "Screenshots"
 
