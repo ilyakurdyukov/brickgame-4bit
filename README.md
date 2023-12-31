@@ -46,6 +46,10 @@ Made for ROM code research.
 | Escape           | exit               |
 | P/Enter          | start/pause        |
 
+### Experimental gamepad support
+
+Compile with `GAMEPAD=1` option to make. Don't know if the control mappings will be the same on different gamepads.
+
 ### "Screenshots"
 
 Game select screen:

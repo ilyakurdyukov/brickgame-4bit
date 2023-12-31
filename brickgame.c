@@ -37,6 +37,16 @@ static uint64_t get_time_usec() {
 #define DISP_CHECK_END 216
 #define DISP_CHECK_SIZE (DISP_CHECK_END - DISP_CHECK_START)
 
+#ifndef USE_GAMEPAD
+#define USE_GAMEPAD 1
+#endif
+
+#if USE_GAMEPAD
+#include <linux/joystick.h>
+#include <sys/poll.h>
+#include <fcntl.h>
+#endif
+
 // to display memory map without flickering
 #ifndef NO_FLICKER
 #define NO_FLICKER 200
@@ -52,7 +62,12 @@ typedef struct {
 #if NO_FLICKER
 	uint16_t memcopy[256];
 #endif
+#if USE_GAMEPAD
+	int js_fd;
+	uint32_t js_keys;
+#endif
 	unsigned hold_time, sleep_ticks, sleep_delay, timer_inc;
+	uint32_t misc;
 	uint32_t keys;
 	uint64_t key_timers[8];
 	uint16_t old_rows[20];
@@ -63,6 +78,91 @@ typedef struct {
 	uint16_t disp_pos[DISP_CHECK_SIZE][4];
 	char disp_buf[1024];
 } sysctx_t;
+
+#if USE_GAMEPAD
+#include <linux/joystick.h>
+#include <sys/poll.h>
+#include <fcntl.h>
+static void sys_gamepad_events(sysctx_t *sys) {
+	struct js_event event;
+	struct pollfd fds = { 0 };
+	fds.fd = sys->js_fd;
+	fds.events = POLLIN;
+	while (poll(&fds, 1, 0)) {
+		int key, state;
+		int n = read(sys->js_fd, &event, sizeof(event));
+		if (n != sizeof(event))
+			ERR_EXIT("unexpected joystic event\n");
+		key = -1;
+		if (event.type == JS_EVENT_BUTTON)
+		switch (event.number) {
+			case 0: /* A */
+			case 1: /* B */
+			case 2: /* X */
+			case 3: /* Y */
+				key = 0; // rotate
+				break;
+			case 4: /* L1 */
+			case 5: /* R1 */
+				key = 17; // memory map
+				break;
+			case 6: /* Select */
+				key = 5; // mute
+				break;
+			case 7: /* Start */
+				key = 4; // start/pause
+				break;
+			case 8:
+				key = 6; // on/off
+				break;
+		}
+		else if (event.type == JS_EVENT_AXIS)
+		switch (event.number) {
+			case 0: /* Left/Right analog */
+			case 6: /* Left/Right */
+				key = 0x132;
+				break;
+			case 1: /* Up/Down analog */
+			case 7: /* Up/Down */
+				key = 0x101;
+				break;
+		}
+
+		if (key == -1) continue;
+		if (key & 0x100) {
+			int key1 = key >> 4 & 15, key2 = key & 15;
+			int value = event.value;
+			if (value <= -0x4000) state = 2;
+			else if (value > 0x3fff) state = 1;
+			else state = 0;
+
+			if (state & 2)
+				sys->js_keys |= 1 << key1;
+			else
+				sys->js_keys &= ~(1 << key1);
+			if (state & 1)
+				sys->js_keys |= 1 << key2;
+			else
+				sys->js_keys &= ~(1 << key2);
+		} else if (key == 17) { // memory map
+			if (event.value == 1) 
+				sys->js_keys ^= 1 << key;
+		} else if (event.value == 1) { // press
+			sys->js_keys |= 1 << key;
+		} else if (event.value == 0) { // release
+			sys->js_keys &= ~(1 << key);
+		}
+	}
+}
+#endif
+
+static inline int sys_keys(sysctx_t *sys) {
+#if USE_GAMEPAD
+	return sys->keys | sys->js_keys;
+#else
+	return sys->keys;
+#endif
+}
 
 // ps: start/pause, mute, on/off
 // pp: rotate, down, right, left
@@ -118,7 +218,10 @@ static int sys_events(sysctx_t *sys) {
 		}
 	}
 #undef SET_KEY
-	return sys->keys;
+#if USE_GAMEPAD
+	if (sys->js_fd >= 0) sys_gamepad_events(sys);
+#endif
+	return sys_keys(sys);
 }
 
 typedef struct {
@@ -180,7 +283,6 @@ static void sys_init(sysctx_t *sys) {
 		uint64_t time = get_time_usec();
 		int i;
 		for (i = 0; i < 7; i++) sys->key_timers[i] = time;
-		sys->keys = 0;
 	}
 
 	printf("\33[2J\33[?25l"); // clear screen, hide cursor
@@ -223,6 +325,9 @@ static void sys_init(sysctx_t *sys) {
 static void sys_close(sysctx_t *sys) {
 	tcsetattr(0, TCSANOW, &sys->tcattr);
 	printf("\33[m\33[2J\33[?25h\33[H"); // show cursor
+#if USE_GAMEPAD
+	close(sys->js_fd);
+#endif
 }
 
 static void sys_redraw(sysctx_t *sys, uint8_t *mem) {
@@ -336,42 +441,40 @@ static void sys_redraw(sysctx_t *sys, uint8_t *mem) {
 	}
 	// update memory map
 	{
-		int i, j, state = sys->keys >> 17 & 3;
+		int i, j;
 		int row = 3;
-		if (state) {
-			if (state & 1) {
-				char buf[32];
-				if (!(state & 2)) {
-					printf("\33[%u;40H    0 1 2 3 4 5 6 7 8 9 a b c d e f", row);
-					printf("\33[%u;40H  /--------------------------------", row + 1);
-					for (i = 0; i < 16; i++)
-						printf("\33[%u;40H%x |", i + row + 2, i);
-					sys->keys |= 1 << 18;
+		if (sys_keys(sys) >> 17 & 1) {
+			char buf[32];
+			if (!(sys->misc & 1)) {
+				printf("\33[%u;40H    0 1 2 3 4 5 6 7 8 9 a b c d e f", row);
+				printf("\33[%u;40H  /--------------------------------", row + 1);
+				for (i = 0; i < 16; i++)
+					printf("\33[%u;40H%x |", i + row + 2, i);
+				sys->misc |= 1;
 #if NO_FLICKER
-					memset(sys->memcopy, 0, sizeof(sys->memcopy));
+				memset(sys->memcopy, 0, sizeof(sys->memcopy));
 #endif
-				}
-				for (i = 0; i < 16; i++) {
-					for (j = 0; j < 16; j++) {
-						int a = mem[i << 4 | j];
-#if NO_FLICKER
-						int b = sys->memcopy[i << 4 | j];
-						int thr = NO_FLICKER * 16;
-						if ((a ^ b) & 15) b = a;
-						if (b < thr) b += 0x10, a = 0x10;
-						sys->memcopy[i << 4 | j] = b;
-#endif
-						buf[j * 2] = a > 15 ? '#' : a < 10 ? a + '0' : a - 10 + 'a';
-						buf[j * 2 + 1] = ' ';
-					}
-					printf("\33[%u;44H%.31s", i + row + 2, buf);
-				}
-			} else {
-				sys->keys &= ~(1 << 18);
-				for (i = 0; i < 18; i++)
-					// "\33[K" - clear right
-					printf("\33[%u;40H\33[K", i + row);
 			}
+			for (i = 0; i < 16; i++) {
+				for (j = 0; j < 16; j++) {
+					int a = mem[i << 4 | j];
+#if NO_FLICKER
+					int b = sys->memcopy[i << 4 | j];
+					int thr = NO_FLICKER * 16;
+					if ((a ^ b) & 15) b = a;
+					if (b < thr) b += 0x10, a = 0x10;
+					sys->memcopy[i << 4 | j] = b;
+#endif
+					buf[j * 2] = a > 15 ? '#' : a < 10 ? a + '0' : a - 10 + 'a';
+					buf[j * 2 + 1] = ' ';
+				}
+				printf("\33[%u;44H%.31s", i + row + 2, buf);
+			}
+		} else if (sys->misc & 1) {
+			sys->misc &= ~1;
+			for (i = 0; i < 18; i++)
+				// "\33[K" - clear right
+				printf("\33[%u;40H\33[K", i + row);
 		}
 	}
 	printf("\33[H\n"); // refresh screen
@@ -661,10 +764,27 @@ static void test_keys() {
 			printf("0x%02x %u\n", x, x);
 }
 
+#if USE_GAMEPAD
+static void test_gamepad(int js_fd) {
+	struct js_event event;
+	if (js_fd >= 0)
+	for (;;) {
+		int n = read(js_fd, &event, sizeof(event));
+		if (n != sizeof(event))
+			ERR_EXIT("unexpected joystic event\n");
+		printf("0x%08x 0x%04x 0x%02x 0x%02x\n",
+				event.time, event.value & 0xffff, event.type, event.number);
+	}
+}
+#endif
+
 int main(int argc, char **argv) {
 	sysctx_t ctx;
 	const char *save_fn = NULL;
 	FILE *f; unsigned n;
+#if USE_GAMEPAD
+	const char* js_fn = "/dev/input/js0";
+#endif
 #ifndef DECOMPILED
 	const char *rom_fn = "brickrom.bin";
 	uint8_t rom[0x1000];
@@ -685,6 +805,13 @@ int main(int argc, char **argv) {
 		} else if (!strcmp(argv[1], "--rom")) {
 			if (argc <= 2) ERR_EXIT("bad option\n");
 			rom_fn = argv[2];
+			argc -= 2; argv += 2;
+#endif
+#if USE_GAMEPAD
+		} else if (!strcmp(argv[1], "--js")) {
+			if (argc <= 2) ERR_EXIT("bad option\n");
+			js_fn = argv[2];
+			if (!*js_fn) js_fn = NULL;
 			argc -= 2; argv += 2;
 #endif
 		} else if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
@@ -757,6 +884,14 @@ int main(int argc, char **argv) {
 	ctx.sleep_delay = sleep_delay;
 	ctx.timer_inc = timer_inc;
 
+#if USE_GAMEPAD
+	ctx.js_fd = -1;
+	if (js_fn) {
+		ctx.js_fd = open(js_fn, O_RDONLY);
+		//test_gamepad(ctx.js_fd);
+	}
+#endif
+
 	//test_keys();
 #ifndef DECOMPILED
 	run_game(rom, &ctx, &cpu);
@@ -794,9 +929,9 @@ static void timer_handler(sysctx_t *sys, cpu_state_t *cpu) {
 }
 
 static int cb_in_ps(sysctx_t *sys, cpu_state_t *cpu) {
-	timer_handler(sys, cpu); return (~sys->keys >> 4) & 0xf; }
+	timer_handler(sys, cpu); return (~sys_keys(sys) >> 4) & 0xf; }
 static int cb_in_pp(sysctx_t *sys, cpu_state_t *cpu) {
-	timer_handler(sys, cpu); return ~sys->keys & 0xf; }
+	timer_handler(sys, cpu); return ~sys_keys(sys) & 0xf; }
 
 static int cb_get_tf(sysctx_t *sys, cpu_state_t *cpu) {
 	int tmr_frac;
@@ -856,7 +991,7 @@ l_start:
 #define SOUND_OFF
 #define HALT
 #define JTMR(label, offset) if (cb_get_tf(sys, cpu)) { \
-	if (sys->keys & 0x10000) { pc = offset; goto l_exit; } \
+	if (sys_keys(sys) & 0x10000) { pc = offset; goto l_exit; } \
 	goto label; \
 }
 
